@@ -407,7 +407,7 @@ func trySU(logf logger.Logf, ia incubatorArgs) (bool, error) {
 		loginArgs = append(loginArgs, ia.cmdArgs...)
 	}
 
-	logf("logging in with %s %+v", su, loginArgs)
+	logf("logging in with %s %q", su, loginArgs)
 	cmd := newCommand(ia.hasTTY, su, loginArgs)
 	return true, cmd.Run()
 }
