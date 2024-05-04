@@ -246,7 +246,7 @@ func beIncubator(args []string) error {
 	}
 
 	if attemptLoginShell {
-		// We weren't able to use login, maybe we can use su.
+		// If we got here, we weren't able to use login (because tryExecLogin returned without replacing the running process), maybe we can use su.
 		if handled, err := trySU(logf, ia); handled {
 			return err
 		} else {
