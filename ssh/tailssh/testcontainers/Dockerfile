@@ -16,23 +16,23 @@ RUN authconfig --enablemkhomedir --update || echo "might not be fedora"
 COPY . .
 
 RUN echo "First run tests normally."
-RUN TAILSCALED_PATH=`pwd`tailscaled ./tailssh.test -test.run TestIntegration
+RUN TAILSCALED_PATH=`pwd`tailscaled ./tailssh.test -test.v -test.run TestIntegration
 
 RUN echo "Then run tests as non-root user testuser and make sure tests still pass."
 RUN chown testuser:groupone /tmp/tailscalessh.log
-RUN TAILSCALED_PATH=`pwd`tailscaled su -m testuser -c "./tailssh.test -test.run TestIntegration TestDoDropPrivileges"
+RUN TAILSCALED_PATH=`pwd`tailscaled su -m testuser -c "./tailssh.test -test.v -test.run TestIntegration TestDoDropPrivileges"
 
 RUN echo "Then remove the login command and make sure tests still pass."
 RUN chown root:root /tmp/tailscalessh.log
 RUN rm `which login`
 RUN rm -Rf /home/testuser
-RUN TAILSCALED_PATH=`pwd`tailscaled ./tailssh.test -test.run TestIntegration
+RUN TAILSCALED_PATH=`pwd`tailscaled ./tailssh.test -test.v -test.run TestIntegration
 
 RUN echo "Then remove the su command and make sure tests still pass."
 RUN chown root:root /tmp/tailscalessh.log
 RUN rm `which su`
 RUN rm -Rf /home/testuser
-RUN TAILSCALED_PATH=`pwd`tailscaled ./tailssh.test -test.run TestIntegration
+RUN TAILSCALED_PATH=`pwd`tailscaled ./tailssh.test -test.v -test.run TestIntegration
 
 RUN echo "Test doDropPrivileges"
-RUN TAILSCALED_PATH=`pwd`tailscaled ./tailssh.test -test.run TestDoDropPrivileges
+RUN TAILSCALED_PATH=`pwd`tailscaled ./tailssh.test -test.v -test.run TestDoDropPrivileges

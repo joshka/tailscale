@@ -114,6 +114,11 @@ func TestIntegrationSSH(t *testing.T) {
 			want: []string{homeDir},
 			skip: runtime.GOOS != "linux" || !suPresent || !loginPresent,
 		},
+		{
+			cmd:  "echo 'hello'",
+			want: []string{"hello"},
+			skip: runtime.GOOS != "linux" || !suPresent || !loginPresent,
+		},
 	}
 
 	for _, test := range tests {
@@ -138,11 +143,19 @@ func TestIntegrationSSH(t *testing.T) {
 						ssh.TTY_OP_OSPEED: 14400,
 					})
 					if err != nil {
+						t.Fatalf("unable to request PTY: %s", err)
+					}
+
+					err = s.Shell()
+					if err != nil {
 						t.Fatalf("unable to request shell: %s", err)
 					}
+
+					// Read the shell prompt
+					s.read()
 				}
 
-				got := s.run(t, test.cmd)
+				got := s.run(t, test.cmd, shell)
 				for _, want := range test.want {
 					if !strings.Contains(got, want) {
 						t.Errorf("%q does not contain %q", got, want)
@@ -195,7 +208,7 @@ func TestIntegrationSFTP(t *testing.T) {
 	}
 
 	s := testSessionFor(t, cl)
-	got := s.run(t, "ls -l "+filePath)
+	got := s.run(t, "ls -l "+filePath, false)
 	if !strings.Contains(got, "testuser") {
 		t.Fatalf("unexpected file owner user: %s", got)
 	} else if !strings.Contains(got, "testuser") {
@@ -211,14 +224,25 @@ type session struct {
 	stderr io.ReadCloser
 }
 
-func (s *session) run(t *testing.T, cmdString string) string {
+func (s *session) run(t *testing.T, cmdString string, shell bool) string {
 	t.Helper()
 
-	err := s.Start(cmdString)
-	if err != nil {
-		t.Fatalf("unable to start command: %s", err)
+	if shell {
+		_, err := s.stdin.Write([]byte(fmt.Sprintf("%s\n", cmdString)))
+		if err != nil {
+			t.Fatalf("unable to send command to shell: %s", err)
+		}
+	} else {
+		err := s.Start(cmdString)
+		if err != nil {
+			t.Fatalf("unable to start command: %s", err)
+		}
 	}
 
+	return s.read()
+}
+
+func (s *session) read() string {
 	ch := make(chan []byte)
 	go func() {
 		for {
