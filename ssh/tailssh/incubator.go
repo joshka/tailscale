@@ -385,7 +385,7 @@ func trySU(logf logger.Logf, ia incubatorArgs) (bool, error) {
 
 	su, err := exec.LookPath("su")
 	if err != nil {
-		logf("can't find su command")
+		logf("can't find su command: %v", err)
 		return false, nil
 	}
 
