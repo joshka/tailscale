@@ -355,16 +355,15 @@ func tryExecLogin(logf logger.Logf, ia incubatorArgs) error {
 		}
 	}
 
-	if loginCmdPath, err := exec.LookPath("login"); err == nil {
-		loginArgs := ia.loginArgs(loginCmdPath)
-		logf("logging in with %s %+v", loginCmdPath, loginArgs)
-		// replace the running process
-		return unix.Exec(loginCmdPath, loginArgs, os.Environ())
-	} else {
+	loginCmdPath, err := exec.LookPath("login")
+	if err != nil {
 		logf("failed to get login args: %s", err)
+		return nil
 	}
-
-	return nil
+	loginArgs := ia.loginArgs(loginCmdPath)
+	logf("logging in with %s %+v", loginCmdPath, loginArgs)
+	// replace the running process
+	return unix.Exec(loginCmdPath, loginArgs, os.Environ())
 }
 
 // trySU attempts to start a login shell using su. If su is available and
