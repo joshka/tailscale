@@ -49,9 +49,12 @@ var ptyName = func(f *os.File) (string, error) {
 	return "", fmt.Errorf("unimplemented")
 }
 
-// maybeStartLoginSession starts a new login session for the specified UID.
-// On success, it may return a non-nil close func which must be closed to
+// maybeStartLoginSession informs the system that we are about to log someone
+// in. On success, it may return a non-nil close func which must be closed to
 // release the session.
+// We can only do this if we are running as root.
+// This is best effort to still allow running on machines where
+// we don't support starting sessions, e.g. darwin.
 // See maybeStartLoginSessionLinux.
 var maybeStartLoginSession = func(logf logger.Logf, ia incubatorArgs) (close func() error, err error) {
 	return nil, nil
@@ -237,23 +240,18 @@ func beIncubator(args []string) error {
 		}
 	}
 
-	attemptLoginShell := shouldAttemptLoginShell(ia)
-	if !attemptLoginShell {
+	switch {
+	case ia.isSFTP:
+		return handleSFTPInProcess(logf, ia)
+	case !shouldAttemptLoginShell(ia):
 		logf("not attempting login shell")
-	} else if err := tryExecLogin(logf, ia); err != nil {
-		return err
-	}
+		return handleSSHInProcess(logf, ia)
+	default:
+		// First try the login command
+		if err := tryExecLogin(logf, ia); err != nil {
+			return err
+		}
 
-	// Inform the system that we are about to log someone in.
-	// We can only do this if we are running as root.
-	// This is best effort to still allow running on machines where
-	// we don't support starting sessions, e.g. darwin.
-	sessionCloser, err := maybeStartLoginSession(logf, ia)
-	if err == nil && sessionCloser != nil {
-		defer sessionCloser()
-	}
-
-	if attemptLoginShell {
 		// If we got here, we weren't able to use login (because tryExecLogin
 		// returned without replacing the running process), maybe we can use
 		// su.
@@ -261,34 +259,31 @@ func beIncubator(args []string) error {
 			return err
 		} else {
 			logf("not attempting su")
+			return handleSSHInProcess(logf, ia)
 		}
 	}
+}
 
-	if ia.isSFTP {
-		// In order to trigger PAM modules like pam_mkhomedir to run, call
-		// findSU, which as a side-effect will actually invoke the su command,
-		// which will trigger the creation of a homedir if so configured.
-		// Note - we won't actually be handling SFTP within a PAM session, so
-		// modules like pam_tty_audit won't work, only side-effecting modules
-		// like pam_mkhomedir will have an effect.
-		_, _ = findSU(logf, ia)
+// handleSFTPInProcess serves SFTP connections.
+func handleSFTPInProcess(logf logger.Logf, ia incubatorArgs) error {
+	logf("handling sftp")
+
+	// In order to trigger PAM modules like pam_mkhomedir to run, call
+	// findSU, which as a side-effect will actually invoke the su command,
+	// which will trigger the creation of a homedir if so configured.
+	// Note - we won't actually be handling SFTP within a PAM session, so
+	// modules like pam_tty_audit won't work, only side-effecting modules
+	// like pam_mkhomedir will have an effect.
+	_, _ = findSU(logf, ia)
+
+	sessionCloser, err := maybeStartLoginSession(logf, ia)
+	if err == nil && sessionCloser != nil {
+		defer sessionCloser()
 	}
 
-	// login and su didn't work, drop privileges and handle in-process.
 	if err := dropPrivileges(logf, ia); err != nil {
 		return err
 	}
-
-	if ia.isSFTP {
-		return handleSFTP(logf)
-	}
-
-	return handleSSHInProcess(logf, ia)
-}
-
-// handleSFTP serves SFTP connections.
-func handleSFTP(logf logger.Logf) error {
-	logf("handling sftp")
 
 	server, err := sftp.NewServer(stdRWC{})
 	if err != nil {
@@ -306,7 +301,6 @@ func handleSFTP(logf logger.Logf) error {
 // login shell with the login or su commands. We will attempt a login shell
 // if all of the following conditions are met.
 //
-// - This is not an sftp session
 // - We are running as root
 // - This is not an SELinuxEnforcing host
 //
@@ -316,7 +310,7 @@ func handleSFTP(logf logger.Logf) error {
 // the incubator to launch the shell.
 // See http://github.com/tailscale/tailscale/issues/4908.
 func shouldAttemptLoginShell(ia incubatorArgs) bool {
-	return !ia.isSFTP && runningAsRoot() && !hostinfo.IsSELinuxEnforcing()
+	return runningAsRoot() && !hostinfo.IsSELinuxEnforcing()
 }
 
 func runningAsRoot() bool {
@@ -389,6 +383,11 @@ func trySU(logf logger.Logf, ia incubatorArgs) (bool, error) {
 		return false, nil
 	}
 
+	sessionCloser, err := maybeStartLoginSession(logf, ia)
+	if err == nil && sessionCloser != nil {
+		defer sessionCloser()
+	}
+
 	loginArgs := []string{"-l", ia.localUser}
 	if ia.cmd != "" {
 		// Note - unlike the login command, su allows using both -l and -c.
@@ -432,10 +431,19 @@ func findSU(logf logger.Logf, ia incubatorArgs) (string, bool) {
 // specified values, and then launches the requested `--cmd` in the user's
 // login shell.
 func handleSSHInProcess(logf logger.Logf, ia incubatorArgs) error {
+	sessionCloser, err := maybeStartLoginSession(logf, ia)
+	if err == nil && sessionCloser != nil {
+		defer sessionCloser()
+	}
+
+	if err := dropPrivileges(logf, ia); err != nil {
+		return err
+	}
+
 	args := shellArgs(ia.isShell, ia.cmd)
 	logf("running %s %q", ia.loginShell, args)
 	cmd := newCommand(ia.hasTTY, ia.loginShell, args)
-	err := cmd.Run()
+	err = cmd.Run()
 	if ee, ok := err.(*exec.ExitError); ok {
 		ps := ee.ProcessState
 		code := ps.ExitCode()
