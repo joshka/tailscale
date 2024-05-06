@@ -92,14 +92,6 @@ func TestIntegrationSSH(t *testing.T) {
 		homeDir = "/Users/testuser"
 	}
 
-	_, err := exec.LookPath("su")
-	suPresent := err == nil
-
-	// Some operating systems like Fedora seem to require login to be present
-	// in order for su to work.
-	_, err = exec.LookPath("login")
-	loginPresent := err == nil
-
 	tests := []struct {
 		cmd  string
 		want []string
@@ -112,12 +104,12 @@ func TestIntegrationSSH(t *testing.T) {
 		{
 			cmd:  "pwd",
 			want: []string{homeDir},
-			skip: runtime.GOOS != "linux" || !suPresent || !loginPresent,
+			skip: !fallbackToSUAvailable(),
 		},
 		{
 			cmd:  "echo 'hello'",
 			want: []string{"hello"},
-			skip: runtime.GOOS != "linux" || !suPresent || !loginPresent,
+			skip: !fallbackToSUAvailable(),
 		},
 	}
 
@@ -172,7 +164,10 @@ func TestIntegrationSFTP(t *testing.T) {
 		debugTest.Store(false)
 	})
 
-	filePath := "/tmp/sftptest.dat"
+	filePath := "/home/testuser/sftptest.dat"
+	if !fallbackToSUAvailable() {
+		filePath = "/tmp/sftptest.dat"
+	}
 	wantText := "hello world"
 
 	cl := testClient(t)
@@ -214,6 +209,22 @@ func TestIntegrationSFTP(t *testing.T) {
 	} else if !strings.Contains(got, "testuser") {
 		t.Fatalf("unexpected file owner group: %s", got)
 	}
+}
+
+func fallbackToSUAvailable() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+
+	_, err := exec.LookPath("su")
+	if err != nil {
+		return false
+	}
+
+	// Some operating systems like Fedora seem to require login to be present
+	// in order for su to work.
+	_, err = exec.LookPath("login")
+	return err == nil
 }
 
 type session struct {

@@ -117,14 +117,13 @@ func (ss *sshSession) newIncubatorCommand(logf logger.Logf) (cmd *exec.Cmd) {
 		incubatorArgs = append(incubatorArgs, "--debug-test")
 	}
 
-	if isSFTP {
+	switch {
+	case isSFTP:
 		incubatorArgs = append(incubatorArgs, "--sftp")
-	} else {
-		if isShell {
-			incubatorArgs = append(incubatorArgs, "--shell")
-		} else {
-			incubatorArgs = append(incubatorArgs, "--cmd="+ss.RawCommand())
-		}
+	case isShell:
+		incubatorArgs = append(incubatorArgs, "--shell")
+	default:
+		incubatorArgs = append(incubatorArgs, "--cmd="+ss.RawCommand())
 	}
 
 	return exec.CommandContext(ss.ctx, ss.conn.srv.tailscaledPath, incubatorArgs...)
@@ -227,7 +226,7 @@ func beIncubator(args []string) error {
 			logf = log.New(sl, "", 0).Printf
 		}
 	} else if ia.debugTest {
-		// In testing, we don't always have syslog, log to a temp file
+		// In testing, we don't always have syslog, so log to a temp file.
 		if logFile, err := os.OpenFile("/tmp/tailscalessh.log", os.O_APPEND|os.O_WRONLY, 0666); err == nil {
 			lf := log.New(logFile, "", 0)
 			logf = func(msg string, args ...any) {
@@ -255,12 +254,24 @@ func beIncubator(args []string) error {
 	}
 
 	if attemptLoginShell {
-		// If we got here, we weren't able to use login (because tryExecLogin returned without replacing the running process), maybe we can use su.
+		// If we got here, we weren't able to use login (because tryExecLogin
+		// returned without replacing the running process), maybe we can use
+		// su.
 		if handled, err := trySU(logf, ia); handled {
 			return err
 		} else {
 			logf("not attempting su")
 		}
+	}
+
+	if ia.isSFTP {
+		// In order to trigger PAM modules like pam_mkhomedir to run, call
+		// findSU, which as a side-effect will actually invoke the su command,
+		// which will trigger the creation of a homedir if so configured.
+		// Note - we won't actually be handling SFTP within a PAM session, so
+		// modules like pam_tty_audit won't work, only side-effecting modules
+		// like pam_mkhomedir will have an effect.
+		_, _ = findSU(logf, ia)
 	}
 
 	// login and su didn't work, drop privileges and handle in-process.
@@ -269,11 +280,6 @@ func beIncubator(args []string) error {
 	}
 
 	if ia.isSFTP {
-		// Note - this does not trigger PAM authentication, so things like
-		// pam_mkhomedir won't work with FTP.
-		// TODO: it would be nice to make SFTP work with PAM, but that might
-		// require directly talking to the PAM API, which would require us to
-		// introduce CGO.
 		return handleSFTP(logf)
 	}
 
@@ -378,38 +384,47 @@ func tryExecLogin(logf logger.Logf, ia incubatorArgs) error {
 // an su command which accepts the right flags, we'll use su instead of login
 // when no TTY is available.
 func trySU(logf logger.Logf, ia incubatorArgs) (bool, error) {
-	// Currently, we only support falling back to su on Linux. This
-	// potentially could work on BSDs as well, but requires testing.
-	if runtime.GOOS != "linux" {
-		return false, nil
-	}
-
-	su, err := exec.LookPath("su")
-	if err != nil {
-		logf("can't find su command: %v", err)
-		return false, nil
-	}
-
-	// First try to execute su -l <user> -c id to make sure su supports the
-	// necessary arguments.
-	err = exec.Command("su", "-l", ia.localUser, "-c", "id").Run()
-	if err != nil {
-		logf("su check failed: %s", err)
+	su, found := findSU(logf, ia)
+	if !found {
 		return false, nil
 	}
 
 	loginArgs := []string{"-l", ia.localUser}
-	if !ia.isShell && ia.cmd != "" {
-		// We only execute the requested command if we're not requesting a
-		// shell. When requesting a shell, the command is the requested shell,
-		// which is redundant because `su -l` will give the user their default
-		// shell.
+	if ia.cmd != "" {
+		// Note - unlike the login command, su allows using both -l and -c.
 		loginArgs = append(loginArgs, "-c", ia.cmd)
 	}
 
 	logf("logging in with %s %q", su, loginArgs)
 	cmd := newCommand(ia.hasTTY, su, loginArgs)
 	return true, cmd.Run()
+}
+
+// findSU attempts to find an su command which supports the -l and -c flags.
+// This actually calls the su command, which can cause side effects like
+// triggering pam_mkhomedir.
+func findSU(logf logger.Logf, ia incubatorArgs) (string, bool) {
+	// Currently, we only support falling back to su on Linux. This
+	// potentially could work on BSDs as well, but requires testing.
+	if runtime.GOOS != "linux" {
+		return "", false
+	}
+
+	su, err := exec.LookPath("su")
+	if err != nil {
+		logf("can't find su command: %v", err)
+		return "", false
+	}
+
+	// First try to execute su -l <user> -c id to make sure su supports the
+	// necessary arguments.
+	err = exec.Command(su, "-l", ia.localUser, "-c", "pwd").Run()
+	if err != nil {
+		logf("su check failed: %s", err)
+		return "", false
+	}
+
+	return su, true
 }
 
 // handleSSHInProcess is a last resort if we couldn't use login or su. It
