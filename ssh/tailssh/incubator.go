@@ -274,7 +274,7 @@ func handleSFTPInProcess(logf logger.Logf, ia incubatorArgs) error {
 	// Note - we won't actually be handling SFTP within a PAM session, so
 	// modules like pam_tty_audit won't work, only side-effecting modules
 	// like pam_mkhomedir will have an effect.
-	_, _ = findSU(logf, ia)
+	_ = findSU(logf, ia)
 
 	sessionCloser, err := maybeStartLoginSession(logf, ia)
 	if err == nil && sessionCloser != nil {
@@ -378,8 +378,8 @@ func tryExecLogin(logf logger.Logf, ia incubatorArgs) error {
 // an su command which accepts the right flags, we'll use su instead of login
 // when no TTY is available.
 func trySU(logf logger.Logf, ia incubatorArgs) (bool, error) {
-	su, found := findSU(logf, ia)
-	if !found {
+	su := findSU(logf, ia)
+	if su == "" {
 		return false, nil
 	}
 
@@ -401,18 +401,19 @@ func trySU(logf logger.Logf, ia incubatorArgs) (bool, error) {
 
 // findSU attempts to find an su command which supports the -l and -c flags.
 // This actually calls the su command, which can cause side effects like
-// triggering pam_mkhomedir.
-func findSU(logf logger.Logf, ia incubatorArgs) (string, bool) {
+// triggering pam_mkhomedir. If a suitable su is not available, this returns
+// "".
+func findSU(logf logger.Logf, ia incubatorArgs) string {
 	// Currently, we only support falling back to su on Linux. This
 	// potentially could work on BSDs as well, but requires testing.
 	if runtime.GOOS != "linux" {
-		return "", false
+		return ""
 	}
 
 	su, err := exec.LookPath("su")
 	if err != nil {
 		logf("can't find su command: %v", err)
-		return "", false
+		return ""
 	}
 
 	// First try to execute su -l <user> -c id to make sure su supports the
@@ -420,10 +421,10 @@ func findSU(logf logger.Logf, ia incubatorArgs) (string, bool) {
 	err = exec.Command(su, "-l", ia.localUser, "-c", "pwd").Run()
 	if err != nil {
 		logf("su check failed: %s", err)
-		return "", false
+		return ""
 	}
 
-	return su, true
+	return su
 }
 
 // handleSSHInProcess is a last resort if we couldn't use login or su. It
@@ -493,9 +494,8 @@ const (
 	assertPrivilegesWereDroppedByAttemptingToUnDrop = false
 )
 
-// dropPrivileges determines the required user ID and group IDs for this
-// incubator and then calls doDropPrivileges to drop privileges for the current
-// process.
+// dropPrivileges calls doDropPrivileges with uid, gid, and gids from the given
+// incubatorArgs.
 func dropPrivileges(logf logger.Logf, ia incubatorArgs) error {
 	return doDropPrivileges(logf, ia.uid, ia.gid, ia.gids)
 }
