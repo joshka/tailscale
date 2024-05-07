@@ -8,6 +8,7 @@ package tailssh
 
 import (
 	"bufio"
+	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -28,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bramvdbogaerde/go-scp"
 	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/sftp"
 	gossh "github.com/tailscale/golang-x-crypto/ssh"
@@ -77,6 +79,10 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		return
 	}
+	defer func() {
+		// wait a little bit for logging to catch up.
+		time.Sleep(2 * time.Second)
+	}()
 
 	m.Run()
 }
@@ -211,6 +217,56 @@ func TestIntegrationSFTP(t *testing.T) {
 	}
 }
 
+func TestIntegrationSCP(t *testing.T) {
+	debugTest.Store(true)
+	t.Cleanup(func() {
+		debugTest.Store(false)
+	})
+
+	filePath := "/home/testuser/scptest.dat"
+	if !fallbackToSUAvailable() {
+		filePath = "/tmp/scptest.dat"
+	}
+	wantText := "hello world"
+
+	cl := testClient(t)
+	scl, err := scp.NewClientBySSH(cl)
+	if err != nil {
+		t.Fatalf("can't get sftp client: %s", err)
+	}
+
+	err = scl.Copy(context.Background(), strings.NewReader(wantText), filePath, "0644", int64(len(wantText)))
+	if err != nil {
+		t.Fatalf("can't create file: %s", err)
+	}
+
+	outfile, err := os.CreateTemp("", "")
+	if err != nil {
+		t.Fatalf("can't create temp file: %s", err)
+	}
+	err = scl.CopyFromRemote(context.Background(), outfile, filePath)
+	if err != nil {
+		t.Fatalf("can't copy file from remote: %s", err)
+	}
+	outfile.Close()
+
+	gotText, err := os.ReadFile(outfile.Name())
+	if err != nil {
+		t.Fatalf("can't read file: %s", err)
+	}
+	if diff := cmp.Diff(string(gotText), wantText); diff != "" {
+		t.Fatalf("unexpected file contents (-got +want):\n%s", diff)
+	}
+
+	s := testSessionFor(t, cl)
+	got := s.run(t, "ls -l "+filePath, false)
+	if !strings.Contains(got, "testuser") {
+		t.Fatalf("unexpected file owner user: %s", got)
+	} else if !strings.Contains(got, "testuser") {
+		t.Fatalf("unexpected file owner group: %s", got)
+	}
+}
+
 func fallbackToSUAvailable() bool {
 	if runtime.GOOS != "linux" {
 		return false
@@ -277,7 +333,7 @@ readLoop:
 		select {
 		case b := <-ch:
 			_got = append(_got, b...)
-		case <-time.After(250 * time.Millisecond):
+		case <-time.After(1 * time.Second):
 			break readLoop
 		}
 	}
