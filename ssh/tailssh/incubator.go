@@ -416,9 +416,9 @@ func findSU(logf logger.Logf, ia incubatorArgs) string {
 		return ""
 	}
 
-	// First try to execute su -l <user> -c id to make sure su supports the
+	// First try to execute su -l <user> -c true to make sure su supports the
 	// necessary arguments.
-	err = exec.Command(su, "-l", ia.localUser, "-c", "pwd").Run()
+	err = exec.Command(su, "-l", ia.localUser, "-c", "true").Run()
 	if err != nil {
 		logf("su check failed: %s", err)
 		return ""

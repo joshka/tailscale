@@ -15,7 +15,8 @@ RUN sed -i -e 's/Default: no/Default: yes/g' /usr/share/pam-configs/mkhomedir ||
 RUN cat /usr/share/pam-configs/mkhomedir
 RUN pam-auth-update --enable mkhomedir
 
-COPY . .
+COPY tailscaled .
+COPY tailssh.test .
 
 RUN echo "First run tests normally."
 RUN rm -Rf /home/testuser
