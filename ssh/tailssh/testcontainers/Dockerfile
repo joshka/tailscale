@@ -18,6 +18,8 @@ RUN pam-auth-update --enable mkhomedir
 COPY tailscaled .
 COPY tailssh.test .
 
+RUN chmod 755 tailscaled
+
 RUN echo "First run tests normally."
 RUN rm -Rf /home/testuser
 RUN TAILSCALED_PATH=`pwd`tailscaled ./tailssh.test -test.v -test.run TestIntegrationSFTP

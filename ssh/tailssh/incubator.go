@@ -43,6 +43,7 @@ import (
 
 func init() {
 	childproc.Add("ssh", beIncubator)
+	childproc.Add("sftp", beSFTP)
 }
 
 var ptyName = func(f *os.File) (string, error) {
@@ -121,10 +122,10 @@ func (ss *sshSession) newIncubatorCommand(logf logger.Logf) (cmd *exec.Cmd) {
 	}
 
 	switch {
-	case isSFTP:
-		incubatorArgs = append(incubatorArgs, "--sftp")
 	case isShell:
 		incubatorArgs = append(incubatorArgs, "--shell")
+	case isSFTP:
+		incubatorArgs = append(incubatorArgs, fmt.Sprintf("--cmd=%s be-child sftp", ss.conn.srv.tailscaledPath))
 	default:
 		incubatorArgs = append(incubatorArgs, "--cmd="+ss.RawCommand())
 	}
@@ -161,7 +162,6 @@ type incubatorArgs struct {
 	ttyName    string
 	hasTTY     bool
 	cmd        string
-	isSFTP     bool
 	isShell    bool
 	debugTest  bool
 }
@@ -182,7 +182,6 @@ func parseIncubatorArgs(args []string) (incubatorArgs, error) {
 	flags.BoolVar(&ia.hasTTY, "has-tty", false, "is the output attached to a tty")
 	flags.StringVar(&ia.cmd, "cmd", "", "the cmd to launch, including all arguments (ignored in sftp mode)")
 	flags.BoolVar(&ia.isShell, "shell", false, "is launching a shell (with no cmds)")
-	flags.BoolVar(&ia.isSFTP, "sftp", false, "run sftp server (cmd is ignored)")
 	flags.BoolVar(&ia.debugTest, "debug-test", false, "should debug in test mode")
 	flags.Parse(args)
 
@@ -218,9 +217,6 @@ func beIncubator(args []string) error {
 	if err != nil {
 		return err
 	}
-	if ia.isSFTP && ia.isShell {
-		return fmt.Errorf("--sftp and --shell are mutually exclusive")
-	}
 
 	logf := logger.Discard
 	if debugIncubator {
@@ -240,51 +236,29 @@ func beIncubator(args []string) error {
 		}
 	}
 
-	switch {
-	case ia.isSFTP:
-		return handleSFTPInProcess(logf, ia)
-	case !shouldAttemptLoginShell(ia):
+	if !shouldAttemptLoginShell(ia) {
 		logf("not attempting login shell")
 		return handleSSHInProcess(logf, ia)
-	default:
-		// First try the login command
-		if err := tryExecLogin(logf, ia); err != nil {
-			return err
-		}
-
-		// If we got here, we weren't able to use login (because tryExecLogin
-		// returned without replacing the running process), maybe we can use
-		// su.
-		if handled, err := trySU(logf, ia); handled {
-			return err
-		} else {
-			logf("not attempting su")
-			return handleSSHInProcess(logf, ia)
-		}
-	}
-}
-
-// handleSFTPInProcess serves SFTP connections.
-func handleSFTPInProcess(logf logger.Logf, ia incubatorArgs) error {
-	logf("handling sftp")
-
-	// In order to trigger PAM modules like pam_mkhomedir to run, call
-	// findSU, which as a side-effect will actually invoke the su command,
-	// which will trigger the creation of a homedir if so configured.
-	// Note - we won't actually be handling SFTP within a PAM session, so
-	// modules like pam_tty_audit won't work, only side-effecting modules
-	// like pam_mkhomedir will have an effect.
-	_ = findSU(logf, ia)
-
-	sessionCloser, err := maybeStartLoginSession(logf, ia)
-	if err == nil && sessionCloser != nil {
-		defer sessionCloser()
 	}
 
-	if err := dropPrivileges(logf, ia); err != nil {
+	// First try the login command
+	if err := tryExecLogin(logf, ia); err != nil {
 		return err
 	}
 
+	// If we got here, we weren't able to use login (because tryExecLogin
+	// returned without replacing the running process), maybe we can use
+	// su.
+	if handled, err := trySU(logf, ia); handled {
+		return err
+	} else {
+		logf("not attempting su")
+		return handleSSHInProcess(logf, ia)
+	}
+}
+
+// beSFTP serves SFTP in-process.
+func beSFTP(args []string) error {
 	server, err := sftp.NewServer(stdRWC{})
 	if err != nil {
 		return err
