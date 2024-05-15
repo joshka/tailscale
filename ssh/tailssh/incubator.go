@@ -36,6 +36,7 @@ import (
 	"golang.org/x/sys/unix"
 	"tailscale.com/cmd/tailscaled/childproc"
 	"tailscale.com/hostinfo"
+	"tailscale.com/tailcfg"
 	"tailscale.com/tempfork/gliderlabs/ssh"
 	"tailscale.com/types/logger"
 	"tailscale.com/version/distro"
@@ -117,15 +118,26 @@ func (ss *sshSession) newIncubatorCommand(logf logger.Logf) (cmd *exec.Cmd) {
 		"--tty-name=",     // updated in-place by startWithPTY
 	}
 
+	forceV1Behavior := ss.conn.srv.lb.NetMap().SelfNode.HasCap(tailcfg.NodeAttrSSHBehaviorV1)
+	if forceV1Behavior {
+		incubatorArgs = append(incubatorArgs, "--force-v1-behavior")
+	}
+
 	if debugTest.Load() {
 		incubatorArgs = append(incubatorArgs, "--debug-test")
 	}
 
 	switch {
+	case isSFTP:
+		// Note that we include both the `--sftp` flag and a command to launch
+		// tailscaled as `be-child sftp`. If login or su is available, and
+		// we're not running with tailcfg.NodeAttrSSHBehaviorV1, this will
+		// result in serving SFTP within a login shell, with full PAM
+		// integration. Otherwise, we'll serve SFTP in the incubator process
+		// with no PAM integration.
+		incubatorArgs = append(incubatorArgs, "--sftp", fmt.Sprintf("--cmd=%s be-child sftp", ss.conn.srv.tailscaledPath))
 	case isShell:
 		incubatorArgs = append(incubatorArgs, "--shell")
-	case isSFTP:
-		incubatorArgs = append(incubatorArgs, fmt.Sprintf("--cmd=%s be-child sftp", ss.conn.srv.tailscaledPath))
 	default:
 		incubatorArgs = append(incubatorArgs, "--cmd="+ss.RawCommand())
 	}
@@ -152,18 +164,20 @@ func (stdRWC) Close() error {
 }
 
 type incubatorArgs struct {
-	loginShell string
-	uid        int
-	gid        int
-	gids       []int
-	localUser  string
-	remoteUser string
-	remoteIP   string
-	ttyName    string
-	hasTTY     bool
-	cmd        string
-	isShell    bool
-	debugTest  bool
+	loginShell      string
+	uid             int
+	gid             int
+	gids            []int
+	localUser       string
+	remoteUser      string
+	remoteIP        string
+	ttyName         string
+	hasTTY          bool
+	cmd             string
+	isSFTP          bool
+	isShell         bool
+	forceV1Behavior bool
+	debugTest       bool
 }
 
 func parseIncubatorArgs(args []string) (incubatorArgs, error) {
@@ -182,6 +196,8 @@ func parseIncubatorArgs(args []string) (incubatorArgs, error) {
 	flags.BoolVar(&ia.hasTTY, "has-tty", false, "is the output attached to a tty")
 	flags.StringVar(&ia.cmd, "cmd", "", "the cmd to launch, including all arguments (ignored in sftp mode)")
 	flags.BoolVar(&ia.isShell, "shell", false, "is launching a shell (with no cmds)")
+	flags.BoolVar(&ia.isSFTP, "sftp", false, "run sftp server (cmd is ignored)")
+	flags.BoolVar(&ia.forceV1Behavior, "force-v1-behavior", false, "allow falling back to the su command if login is unavailable")
 	flags.BoolVar(&ia.debugTest, "debug-test", false, "should debug in test mode")
 	flags.Parse(args)
 
@@ -217,6 +233,9 @@ func beIncubator(args []string) error {
 	if err != nil {
 		return err
 	}
+	if ia.isSFTP && ia.isShell {
+		return fmt.Errorf("--sftp and --shell are mutually exclusive")
+	}
 
 	logf := logger.Discard
 	if debugIncubator {
@@ -236,9 +255,9 @@ func beIncubator(args []string) error {
 		}
 	}
 
-	if !shouldAttemptLoginShell(ia) {
+	if !shouldAttemptLoginShell(logf, ia) {
 		logf("not attempting login shell")
-		return handleSSHInProcess(logf, ia)
+		return handleInProcess(logf, ia)
 	}
 
 	// First try the login command
@@ -253,12 +272,38 @@ func beIncubator(args []string) error {
 		return err
 	} else {
 		logf("not attempting su")
-		return handleSSHInProcess(logf, ia)
+		return handleInProcess(logf, ia)
 	}
+}
+
+func handleInProcess(logf logger.Logf, ia incubatorArgs) error {
+	if ia.isSFTP {
+		return handleSFTPInProcess(logf, ia)
+	}
+	return handleSSHInProcess(logf, ia)
+}
+
+func handleSFTPInProcess(logf logger.Logf, ia incubatorArgs) error {
+	logf("handling sftp")
+
+	sessionCloser, err := maybeStartLoginSession(logf, ia)
+	if err == nil && sessionCloser != nil {
+		defer sessionCloser()
+	}
+
+	if err := dropPrivileges(logf, ia); err != nil {
+		return err
+	}
+
+	return serveSFTP()
 }
 
 // beSFTP serves SFTP in-process.
 func beSFTP(args []string) error {
+	return serveSFTP()
+}
+
+func serveSFTP() error {
 	server, err := sftp.NewServer(stdRWC{})
 	if err != nil {
 		return err
@@ -283,7 +328,13 @@ func beSFTP(args []string) error {
 // shell. So, we don't bother trying to run them and instead fall back to using
 // the incubator to launch the shell.
 // See http://github.com/tailscale/tailscale/issues/4908.
-func shouldAttemptLoginShell(ia incubatorArgs) bool {
+func shouldAttemptLoginShell(logf logger.Logf, ia incubatorArgs) bool {
+	if ia.forceV1Behavior && ia.isSFTP {
+		// v1 behavior did not run SFTP within a login shell.
+		logf("Forcing v1 behavior, won't use login shell for SFTP")
+		return false
+	}
+
 	return runningAsRoot() && !hostinfo.IsSELinuxEnforcing()
 }
 
@@ -352,6 +403,12 @@ func tryExecLogin(logf logger.Logf, ia incubatorArgs) error {
 // an su command which accepts the right flags, we'll use su instead of login
 // when no TTY is available.
 func trySU(logf logger.Logf, ia incubatorArgs) (bool, error) {
+	if ia.forceV1Behavior {
+		// v1 behavior did not use su.
+		logf("Forcing v1 behavior, won't use su")
+		return false, nil
+	}
+
 	su := findSU(logf, ia)
 	if su == "" {
 		return false, nil

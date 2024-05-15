@@ -2274,6 +2274,9 @@ const (
 	// depending on the destination address and the configured routes. When present, it also makes
 	// the DNS forwarder use UserDial instead of SystemDial when dialing resolvers.
 	NodeAttrUserDialUseRoutes NodeCapability = "user-dial-routes"
+
+	// NodeAttrSSHBehaviorV1 forces SSH to use the V1 behavior (no su, run SFTP in-process)
+	NodeAttrSSHBehaviorV1 NodeCapability = "ssh-behavior-v1"
 )
 
 // SetDNSRequest is a request to add a DNS record.

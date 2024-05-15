@@ -99,23 +99,32 @@ func TestIntegrationSSH(t *testing.T) {
 	}
 
 	tests := []struct {
-		cmd  string
-		want []string
-		skip bool
+		cmd             string
+		want            []string
+		forceV1Behavior bool
+		skip            bool
 	}{
 		{
-			cmd:  "id",
-			want: []string{"testuser", "groupone", "grouptwo"},
+			cmd:             "id",
+			want:            []string{"testuser", "groupone", "grouptwo"},
+			forceV1Behavior: false,
 		},
 		{
-			cmd:  "pwd",
-			want: []string{homeDir},
-			skip: !fallbackToSUAvailable(),
+			cmd:             "id",
+			want:            []string{"testuser", "groupone", "grouptwo"},
+			forceV1Behavior: true,
 		},
 		{
-			cmd:  "echo 'hello'",
-			want: []string{"hello"},
-			skip: !fallbackToSUAvailable(),
+			cmd:             "pwd",
+			want:            []string{homeDir},
+			skip:            !fallbackToSUAvailable(),
+			forceV1Behavior: false,
+		},
+		{
+			cmd:             "echo 'hello'",
+			want:            []string{"hello"},
+			skip:            !fallbackToSUAvailable(),
+			forceV1Behavior: false,
 		},
 	}
 
@@ -131,8 +140,13 @@ func TestIntegrationSSH(t *testing.T) {
 				shellQualifier = "shell"
 			}
 
-			t.Run(fmt.Sprintf("%s_%s", test.cmd, shellQualifier), func(t *testing.T) {
-				s := testSession(t)
+			versionQualifier := "v2"
+			if test.forceV1Behavior {
+				versionQualifier = "v1"
+			}
+
+			t.Run(fmt.Sprintf("%s_%s_%s", test.cmd, shellQualifier, versionQualifier), func(t *testing.T) {
+				s := testSession(t, test.forceV1Behavior)
 
 				if shell {
 					err := s.RequestPty("xterm", 40, 80, ssh.TerminalModes{
@@ -170,50 +184,58 @@ func TestIntegrationSFTP(t *testing.T) {
 		debugTest.Store(false)
 	})
 
-	filePath := "/home/testuser/sftptest.dat"
-	if !fallbackToSUAvailable() {
-		filePath = "/tmp/sftptest.dat"
-	}
-	wantText := "hello world"
+	for _, forceV1Behavior := range []bool{false, true} {
+		name := "v2"
+		if forceV1Behavior {
+			name = "v1"
+		}
+		t.Run(name, func(t *testing.T) {
+			filePath := "/home/testuser/sftptest.dat"
+			if forceV1Behavior || !fallbackToSUAvailable() {
+				filePath = "/tmp/sftptest.dat"
+			}
+			wantText := "hello world"
 
-	cl := testClient(t)
-	scl, err := sftp.NewClient(cl)
-	if err != nil {
-		t.Fatalf("can't get sftp client: %s", err)
-	}
+			cl := testClient(t, forceV1Behavior)
+			scl, err := sftp.NewClient(cl)
+			if err != nil {
+				t.Fatalf("can't get sftp client: %s", err)
+			}
 
-	file, err := scl.Create(filePath)
-	if err != nil {
-		t.Fatalf("can't create file: %s", err)
-	}
-	_, err = file.Write([]byte(wantText))
-	if err != nil {
-		t.Fatalf("can't write to file: %s", err)
-	}
-	err = file.Close()
-	if err != nil {
-		t.Fatalf("can't close file: %s", err)
-	}
+			file, err := scl.Create(filePath)
+			if err != nil {
+				t.Fatalf("can't create file: %s", err)
+			}
+			_, err = file.Write([]byte(wantText))
+			if err != nil {
+				t.Fatalf("can't write to file: %s", err)
+			}
+			err = file.Close()
+			if err != nil {
+				t.Fatalf("can't close file: %s", err)
+			}
 
-	file, err = scl.OpenFile(filePath, os.O_RDONLY)
-	if err != nil {
-		t.Fatalf("can't open file: %s", err)
-	}
-	defer file.Close()
-	gotText, err := io.ReadAll(file)
-	if err != nil {
-		t.Fatalf("can't read file: %s", err)
-	}
-	if diff := cmp.Diff(string(gotText), wantText); diff != "" {
-		t.Fatalf("unexpected file contents (-got +want):\n%s", diff)
-	}
+			file, err = scl.OpenFile(filePath, os.O_RDONLY)
+			if err != nil {
+				t.Fatalf("can't open file: %s", err)
+			}
+			defer file.Close()
+			gotText, err := io.ReadAll(file)
+			if err != nil {
+				t.Fatalf("can't read file: %s", err)
+			}
+			if diff := cmp.Diff(string(gotText), wantText); diff != "" {
+				t.Fatalf("unexpected file contents (-got +want):\n%s", diff)
+			}
 
-	s := testSessionFor(t, cl)
-	got := s.run(t, "ls -l "+filePath, false)
-	if !strings.Contains(got, "testuser") {
-		t.Fatalf("unexpected file owner user: %s", got)
-	} else if !strings.Contains(got, "testuser") {
-		t.Fatalf("unexpected file owner group: %s", got)
+			s := testSessionFor(t, cl)
+			got := s.run(t, "ls -l "+filePath, false)
+			if !strings.Contains(got, "testuser") {
+				t.Fatalf("unexpected file owner user: %s", got)
+			} else if !strings.Contains(got, "testuser") {
+				t.Fatalf("unexpected file owner group: %s", got)
+			}
+		})
 	}
 }
 
@@ -223,47 +245,55 @@ func TestIntegrationSCP(t *testing.T) {
 		debugTest.Store(false)
 	})
 
-	filePath := "/home/testuser/scptest.dat"
-	if !fallbackToSUAvailable() {
-		filePath = "/tmp/scptest.dat"
-	}
-	wantText := "hello world"
+	for _, forceV1Behavior := range []bool{false, true} {
+		name := "v2"
+		if forceV1Behavior {
+			name = "v1"
+		}
+		t.Run(name, func(t *testing.T) {
+			filePath := "/home/testuser/scptest.dat"
+			if !fallbackToSUAvailable() {
+				filePath = "/tmp/scptest.dat"
+			}
+			wantText := "hello world"
 
-	cl := testClient(t)
-	scl, err := scp.NewClientBySSH(cl)
-	if err != nil {
-		t.Fatalf("can't get sftp client: %s", err)
-	}
+			cl := testClient(t, forceV1Behavior)
+			scl, err := scp.NewClientBySSH(cl)
+			if err != nil {
+				t.Fatalf("can't get sftp client: %s", err)
+			}
 
-	err = scl.Copy(context.Background(), strings.NewReader(wantText), filePath, "0644", int64(len(wantText)))
-	if err != nil {
-		t.Fatalf("can't create file: %s", err)
-	}
+			err = scl.Copy(context.Background(), strings.NewReader(wantText), filePath, "0644", int64(len(wantText)))
+			if err != nil {
+				t.Fatalf("can't create file: %s", err)
+			}
 
-	outfile, err := os.CreateTemp("", "")
-	if err != nil {
-		t.Fatalf("can't create temp file: %s", err)
-	}
-	err = scl.CopyFromRemote(context.Background(), outfile, filePath)
-	if err != nil {
-		t.Fatalf("can't copy file from remote: %s", err)
-	}
-	outfile.Close()
+			outfile, err := os.CreateTemp("", "")
+			if err != nil {
+				t.Fatalf("can't create temp file: %s", err)
+			}
+			err = scl.CopyFromRemote(context.Background(), outfile, filePath)
+			if err != nil {
+				t.Fatalf("can't copy file from remote: %s", err)
+			}
+			outfile.Close()
 
-	gotText, err := os.ReadFile(outfile.Name())
-	if err != nil {
-		t.Fatalf("can't read file: %s", err)
-	}
-	if diff := cmp.Diff(string(gotText), wantText); diff != "" {
-		t.Fatalf("unexpected file contents (-got +want):\n%s", diff)
-	}
+			gotText, err := os.ReadFile(outfile.Name())
+			if err != nil {
+				t.Fatalf("can't read file: %s", err)
+			}
+			if diff := cmp.Diff(string(gotText), wantText); diff != "" {
+				t.Fatalf("unexpected file contents (-got +want):\n%s", diff)
+			}
 
-	s := testSessionFor(t, cl)
-	got := s.run(t, "ls -l "+filePath, false)
-	if !strings.Contains(got, "testuser") {
-		t.Fatalf("unexpected file owner user: %s", got)
-	} else if !strings.Contains(got, "testuser") {
-		t.Fatalf("unexpected file owner group: %s", got)
+			s := testSessionFor(t, cl)
+			got := s.run(t, "ls -l "+filePath, false)
+			if !strings.Contains(got, "testuser") {
+				t.Fatalf("unexpected file owner user: %s", got)
+			} else if !strings.Contains(got, "testuser") {
+				t.Fatalf("unexpected file owner group: %s", got)
+			}
+		})
 	}
 }
 
@@ -341,12 +371,12 @@ readLoop:
 	return string(_got)
 }
 
-func testClient(t *testing.T) *ssh.Client {
+func testClient(t *testing.T, forceV1Behavior bool) *ssh.Client {
 	t.Helper()
 
 	username := "testuser"
 	srv := &server{
-		lb:             &testBackend{localUser: username},
+		lb:             &testBackend{localUser: username, forceV1Behavior: forceV1Behavior},
 		logf:           log.Printf,
 		tailscaledPath: os.Getenv("TAILSCALED_PATH"),
 		timeNow:        time.Now,
@@ -376,8 +406,8 @@ func testClient(t *testing.T) *ssh.Client {
 	return cl
 }
 
-func testSession(t *testing.T) *session {
-	cl := testClient(t)
+func testSession(t *testing.T, forceV1Behavior bool) *session {
+	cl := testClient(t, forceV1Behavior)
 	return testSessionFor(t, cl)
 }
 
@@ -404,7 +434,8 @@ func testSessionFor(t *testing.T, cl *ssh.Client) *session {
 
 // testBackend implements ipnLocalBackend
 type testBackend struct {
-	localUser string
+	localUser       string
+	forceV1Behavior bool
 }
 
 func (tb *testBackend) GetSSH_HostKeys() ([]gossh.Signer, error) {
@@ -444,16 +475,23 @@ func (tb *testBackend) ShouldRunSSH() bool {
 }
 
 func (tb *testBackend) NetMap() *netmap.NetworkMap {
+	capMap := make(tailcfg.NodeCapMap)
+	if tb.forceV1Behavior {
+		capMap[tailcfg.NodeAttrSSHBehaviorV1] = nil
+	}
 	return &netmap.NetworkMap{
 		SSHPolicy: &tailcfg.SSHPolicy{
 			Rules: []*tailcfg.SSHRule{
-				&tailcfg.SSHRule{
+				{
 					Principals: []*tailcfg.SSHPrincipal{{Any: true}},
 					Action:     &tailcfg.SSHAction{Accept: true},
 					SSHUsers:   map[string]string{"*": tb.localUser},
 				},
 			},
 		},
+		SelfNode: (&tailcfg.Node{
+			CapMap: capMap,
+		}).View(),
 	}
 }
 
