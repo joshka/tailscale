@@ -6,6 +6,7 @@
 #include <linux/if_ether.h>
 #include <linux/in.h>
 #include <linux/ip.h>
+#include <linux/ipv6.h>
 #include <linux/udp.h>
 
 // TODO: remove
@@ -73,23 +74,45 @@ int xdp_prog_func(struct xdp_md *ctx) {
 		return XDP_PASS;
 	}
 
-	if (eth->h_proto != bpf_htons(ETH_P_IP)) {
-		return XDP_PASS;
-	}
+	struct iphdr *ip;
+	struct ipv6hdr *ip6;
+	struct udphdr *udp;
 
-	// TODO: ipv6
+	int is_ipv6;
+	if (eth->h_proto == bpf_htons(ETH_P_IP)) {
+		ip = (void *)(eth + 1);
+    	if ((void *)(ip + 1) > data_end) {
+    		return XDP_PASS;
+    	}
 
-	struct iphdr *ip = (void *)(eth + 1);
-	if ((void *)(ip + 1) > data_end) {
-		return XDP_PASS;
-	}
+    	if (ip->ihl != 5 || ip->version != 4 || ip->protocol != IPPROTO_UDP) {
+    		return XDP_PASS;
+    	}
 
-	if (ip->ihl != 5 || ip->version != 4 || ip->protocol != IPPROTO_UDP) {
-		return XDP_PASS;
-	}
+		udp = (void *)(ip + 1);
+		if ((void *)(udp + 1) > data_end) {
+			return XDP_PASS;
+		}
 
-	struct udphdr *udp = (void *)(ip + 1);
-	if ((void *)(udp + 1) > data_end) {
+		is_ipv6 = 0;
+	} else if (eth->h_proto == bpf_htons(ETH_P_IPV6)) {
+		ip6 = (void *)(eth + 1);
+		if ((void *)(ip6 + 1) > data_end) {
+			return XDP_PASS;
+		}
+
+		if (ip6->version != 6 || ip6->nexthdr != IPPROTO_UDP) {
+			return XDP_PASS;
+		}
+
+		udp = (void *)(ip6 + 1);
+		if ((void *)(udp + 1) > data_end) {
+			return XDP_PASS;
+		}
+
+		is_ipv6 = 1;
+		return XDP_PASS; // TODO remove
+	} else {
 		return XDP_PASS;
 	}
 
@@ -161,12 +184,20 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	// Set success response and new length. Magic cookie and txid remain the
 	// same.
 	req->type = bpf_htons(STUN_BINDING_RESPONSE);
-	req->length = bpf_htons(4 + 8); // stunattr + xor-mapped-addr attr (ipv4)
+	if (is_ipv6) {
+		req->length = bpf_htons(4 + 20); // stunattr + xor-mapped-addr attr (ipv6)
+	} else {
+		req->length = bpf_htons(4 + 8); // stunattr + xor-mapped-addr attr (ipv4)
+	}
 
-	// Set attr type. Length remains unchanged (8), but set it again for future
+	// Set attr type. Length remains unchanged, but set it again for future
 	// safety reasons.
 	sa->num = bpf_htons(STUN_ATTR_XOR_MAPPED_ADDR);
-	sa->length = bpf_htons(8);
+	if (is_ipv6) {
+		sa->length = bpf_htons(20);
+	} else {
+		sa->length = bpf_htons(8);
+	}
 
 	// Set attr data.
 	struct stunxor *xor = attr_data;
@@ -174,6 +205,7 @@ int xdp_prog_func(struct xdp_md *ctx) {
 		return XDP_ABORTED;
 	}
 	xor->unused = 0x00; // unused byte
+	// TODO: ipv6
 	xor->family = 0x01; // family ipv4
 	xor->port = bpf_htons(bpf_ntohs(udp->source) ^ STUN_MAGIC_FOR_PORT_XOR);
 	xor->addr = bpf_htonl(bpf_ntohl(ip->saddr) ^ STUN_MAGIC);
@@ -185,6 +217,7 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	__builtin_memcpy(eth->h_dest, eth_tmp, ETH_ALEN);
 
 	// Flip ip header source and destination address.
+	// TODO: ipv6
 	__be32 ip_tmp = ip->saddr;
 	ip->saddr = ip->daddr;
 	ip->daddr = ip_tmp;
@@ -209,12 +242,14 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	if ((void *)(eth + 1) > data_end) {
 		return XDP_ABORTED;
 	}
+	// TODO: ipv6
 	ip = (void *)(eth + 1);
 	if ((void *)(ip + 1) > data_end) {
 		return XDP_ABORTED;
 	}
 
 	// Update ip header total length field and checksum.
+	// TODO: not ipv6
 	__u16 tot_len = data_end - (void *)ip;
 	ip->tot_len = bpf_htons(tot_len);
 	ip->check = 0;
@@ -232,6 +267,7 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	udp->check = 0;
 	cs = 0;
 	// Pseudoheader bits.
+	// TODO: ipv6
 	cs += (__u16)ip->saddr;
 	cs += (__u16)(ip->saddr >> 16);
 	cs += (__u16)ip->daddr;
@@ -240,6 +276,7 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	cs += udp->len;
 	// Avoid dynamic length math against the packet pointer, which is just a big
 	// verifier headache. Instead sizeof() all the things.
+	// TODO: ipv6
 	int to_size = sizeof(*udp) + sizeof(*req) + sizeof(*sa) + sizeof(*xor);
 	if ((void *)udp + to_size > data_end) {
 		return XDP_ABORTED;
