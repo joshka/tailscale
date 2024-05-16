@@ -36,11 +36,32 @@ struct stunattr {
 	__be16 length;
 };
 
+struct stunxor {
+	__u8 unused;
+	__u8 family;
+	__be16 port;
+	__be32 addr;
+};
+
 #define STUN_BINDING_REQUEST 1
 
 #define STUN_MAGIC 0x2112a442
 
 #define STUN_ATTR_SW 0x8022
+
+#define STUN_ATTR_XOR_MAPPED_ADDR 0x0020
+
+#define STUN_BINDING_RESPONSE 0x0101
+
+#define STUN_MAGIC_FOR_PORT_XOR 0x2112
+
+static __always_inline __u16 csum_fold_helper(__u32 csum)
+{
+	__u32 sum;
+	sum = (csum >> 16) + (csum & 0xffff);
+	sum += (sum >> 16);
+	return ~sum;
+}
 
 SEC("xdp")
 int xdp_prog_func(struct xdp_md *ctx) {
@@ -132,11 +153,99 @@ int xdp_prog_func(struct xdp_md *ctx) {
 		}
 	}
 
-	// TODO: update udp payload
-	// TODO: flip eth src/dst
-	// TODO: flip ip src/dst
-	// TODO: recalc UDP checksum
+	// Begin transforming packet into a STUN_BINDING_RESPONSE. From here
+	// onwards we return XDP_ABORTED instead of XDP_PASS when transformations or
+	// bounds checks fail as it would be nonsensical to pass a mangled packet
+	// through to the kernel.
+
+	// Set success response and new length. Magic cookie and txid remain the
+	// same.
+	req->type = bpf_htons(STUN_BINDING_RESPONSE);
+	req->length = bpf_htons(4 + 8); // stunattr + xor-mapped-addr attr (ipv4)
+
+	// Set attr type. Length remains unchanged (8), but set it again for future
+	// safety reasons.
+	sa->num = bpf_htons(STUN_ATTR_XOR_MAPPED_ADDR);
+	sa->length = bpf_htons(8);
+
+	// Set attr data.
+	struct stunxor *xor = attr_data;
+	if ((void *)(xor + 1) > data_end) {
+		return XDP_ABORTED;
+	}
+	xor->unused = 0x00; // unused byte
+	xor->family = 0x01; // family ipv4
+	xor->port = bpf_htons(bpf_ntohs(udp->source) ^ STUN_MAGIC_FOR_PORT_XOR);
+	xor->addr = bpf_htonl(bpf_ntohl(ip->saddr) ^ STUN_MAGIC);
+
+	// Flip ethernet header source and destination address.
+	__u8 eth_tmp[ETH_ALEN];
+	__builtin_memcpy(eth_tmp, eth->h_source, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, eth->h_dest, ETH_ALEN);
+	__builtin_memcpy(eth->h_dest, eth_tmp, ETH_ALEN);
+
+	// Flip ip header source and destination address.
+	__be32 ip_tmp = ip->saddr;
+	ip->saddr = ip->daddr;
+	ip->daddr = ip_tmp;
+
+	// Flip udp header source and destination ports;
+	__be16 port_tmp = udp->source;
+	udp->source = udp->dest;
+	udp->dest = port_tmp;
+
 	// TODO: stats
 
-	return XDP_DROP;
+	// Trim packet to end of xor stun attribute.
+	int shrink = (void *)(xor + 1) - data_end;
+	if (bpf_xdp_adjust_tail(ctx, shrink)) {
+		return XDP_ABORTED;
+	}
+
+	// Reset pointers post tail adjustment.
+	data_end = (void *)(long)ctx->data_end;
+	data = (void *)(long)ctx->data;
+	eth = data;
+	if ((void *)(eth + 1) > data_end) {
+		return XDP_ABORTED;
+	}
+	ip = (void *)(eth + 1);
+	if ((void *)(ip + 1) > data_end) {
+		return XDP_ABORTED;
+	}
+
+	// Update ip header total length field and checksum.
+	__u16 tot_len = data_end - (void *)ip;
+	ip->tot_len = bpf_htons(tot_len);
+	ip->check = 0;
+	__u32 cs = 0;
+	cs = bpf_csum_diff(0, 0, (void *)ip, sizeof(*ip), cs);
+	ip->check = csum_fold_helper(cs);
+
+	// Update udp header length and checksum.
+	udp = (void *)(ip + 1);
+	if ((void *)(udp +1) > data_end) {
+		return XDP_ABORTED;
+	}
+	__u16 udp_len = data_end - (void *)udp;
+	udp->len = bpf_htons(udp_len);
+	udp->check = 0;
+	cs = 0;
+	// Pseudoheader bits.
+	cs += (__u16)ip->saddr;
+	cs += (__u16)(ip->saddr >> 16);
+	cs += (__u16)ip->daddr;
+	cs += (__u16)(ip->daddr >> 16);
+	cs += (__u16)ip->protocol << 8;
+	cs += udp->len;
+	// Avoid dynamic length math against the packet pointer, which is just a big
+	// verifier headache. Instead sizeof() all the things.
+	int to_size = sizeof(*udp) + sizeof(*req) + sizeof(*sa) + sizeof(*xor);
+	if ((void *)udp + to_size > data_end) {
+		return XDP_ABORTED;
+	}
+	cs = bpf_csum_diff(0, 0, (void*)udp, to_size, cs);
+	udp->check = csum_fold_helper(cs);
+
+	return XDP_TX;
 }
