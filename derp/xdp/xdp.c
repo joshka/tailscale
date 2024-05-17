@@ -187,24 +187,25 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	// Begin transforming packet into a STUN_BINDING_RESPONSE. From here
 	// onwards we return XDP_ABORTED instead of XDP_PASS when transformations or
 	// bounds checks fail as it would be nonsensical to pass a mangled packet
-	// through to the kernel.
+	// through to the kernel, and we may be interested in debugging via
+	// tracepoint.
 
 	// Set success response and new length. Magic cookie and txid remain the
 	// same.
 	req->type = bpf_htons(STUN_BINDING_RESPONSE);
 	if (is_ipv6) {
-		req->length = bpf_htons(4 + 20); // stunattr + xor-mapped-addr attr (ipv6)
+		req->length = bpf_htons(sizeof(struct stunattr) + sizeof(struct stunxor6));
 	} else {
-		req->length = bpf_htons(4 + 8); // stunattr + xor-mapped-addr attr (ipv4)
+		req->length = bpf_htons(sizeof(struct stunattr) + sizeof(struct stunxor));
 	}
 
 	// Set attr type. Length remains unchanged, but set it again for future
 	// safety reasons.
 	sa->num = bpf_htons(STUN_ATTR_XOR_MAPPED_ADDR);
 	if (is_ipv6) {
-		sa->length = bpf_htons(20);
+		sa->length = bpf_htons(sizeof(struct stunxor6));
 	} else {
-		sa->length = bpf_htons(8);
+		sa->length = bpf_htons(sizeof(struct stunxor));
 	}
 
 	// Set attr data.
@@ -273,7 +274,7 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	if (is_ipv6) {
 		struct in6_addr ip_tmp = ip6->saddr;
 		ip6->saddr = ip6->daddr;
-		ip6->daddr = ip6->saddr;
+		ip6->daddr = ip_tmp;
 	} else {
 		__be32 ip_tmp = ip->saddr;
 		ip->saddr = ip->daddr;
