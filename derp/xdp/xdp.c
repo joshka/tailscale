@@ -26,6 +26,21 @@ struct bpf_map_def SEC("maps") config_map = {
 
 // TODO: stats map and enum
 
+enum stats_key {
+	STAT_PACKETS_RX_TOTAL,
+	STAT_BYTES_RX_TOTAL,
+	STAT_PACKETS_TX_TOTAL,
+	STAT_BYTES_TX_TOTAL,
+	STATS_LEN
+};
+
+struct bpf_map_def SEC("maps") stats_map = {
+      .type = BPF_MAP_TYPE_PERCPU_ARRAY,
+      .key_size = sizeof(__u32),
+      .value_size = sizeof(__u64),
+      .max_entries = STATS_LEN,
+};
+
 struct stunreq {
 	__be16 type;
 	__be16 length;
@@ -65,18 +80,29 @@ struct stunxor6 {
 
 #define STUN_MAGIC_FOR_PORT_XOR 0x2112
 
-static __always_inline __u16 csum_fold_helper(__u32 csum)
-{
+static __always_inline __u16 csum_fold_helper(__u32 csum) {
 	__u32 sum;
 	sum = (csum >> 16) + (csum & 0xffff);
 	sum += (sum >> 16);
 	return ~sum;
 }
 
+static __always_inline int inc_stat(__u32 key, __u32 val) {
+	__u64 *stat = bpf_map_lookup_elem(&stats_map, &key);
+	if (!stat) {
+		return -1;
+	}
+	*stat = *stat + val;
+	return 1;
+}
+
 SEC("xdp")
 int xdp_prog_func(struct xdp_md *ctx) {
 	void *data_end = (void *)(long)ctx->data_end;
 	void *data     = (void *)(long)ctx->data;
+
+	inc_stat(STAT_PACKETS_RX_TOTAL, 1);
+	inc_stat(STAT_BYTES_RX_TOTAL, data_end - data);
 
 	struct ethhdr *eth = data;
 	if ((void *)(eth + 1) > data_end) {
@@ -376,5 +402,7 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	}
 	cs = bpf_csum_diff(0, 0, (void*)udp, to_csum_len, cs);
 	udp->check = csum_fold_helper(cs);
+	inc_stat(STAT_PACKETS_TX_TOTAL, 1);
+	inc_stat(STAT_BYTES_TX_TOTAL, data_end - data);
 	return XDP_TX;
 }
