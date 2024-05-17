@@ -14,6 +14,22 @@ import (
 
 type bpfConfig struct{ DstPort uint16 }
 
+type bpfStatsKey uint32
+
+const (
+	bpfStatsKeySTAT_PACKETS_RX_TOTAL      bpfStatsKey = 0
+	bpfStatsKeySTAT_BYTES_RX_TOTAL        bpfStatsKey = 1
+	bpfStatsKeySTAT_PACKETS_PASS_TOTAL    bpfStatsKey = 2
+	bpfStatsKeySTAT_BYTES_PASS_TOTAL      bpfStatsKey = 3
+	bpfStatsKeySTAT_PACKETS_ABORTED_TOTAL bpfStatsKey = 4
+	bpfStatsKeySTAT_BYTES_ABORTED_TOTAL   bpfStatsKey = 5
+	bpfStatsKeySTAT_PACKETS_TX_TOTAL      bpfStatsKey = 6
+	bpfStatsKeySTAT_BYTES_TX_TOTAL        bpfStatsKey = 7
+	bpfStatsKeySTAT_PACKETS_DROP_TOTAL    bpfStatsKey = 8
+	bpfStatsKeySTAT_BYTES_DROP_TOTAL      bpfStatsKey = 9
+	bpfStatsKeySTATS_LEN                  bpfStatsKey = 10
+)
+
 // loadBpf returns the embedded CollectionSpec for bpf.
 func loadBpf() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_BpfBytes)

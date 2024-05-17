@@ -24,15 +24,20 @@ struct bpf_map_def SEC("maps") config_map = {
       .max_entries = 1,
 };
 
-// TODO: stats map and enum
-
 enum stats_key {
 	STAT_PACKETS_RX_TOTAL,
 	STAT_BYTES_RX_TOTAL,
+	STAT_PACKETS_PASS_TOTAL,
+	STAT_BYTES_PASS_TOTAL,
+	STAT_PACKETS_ABORTED_TOTAL,
+	STAT_BYTES_ABORTED_TOTAL,
 	STAT_PACKETS_TX_TOTAL,
 	STAT_BYTES_TX_TOTAL,
+	STAT_PACKETS_DROP_TOTAL,
+	STAT_BYTES_DROP_TOTAL,
 	STATS_LEN
 };
+enum stats_key *unused_stats_key __attribute__((unused));
 
 struct bpf_map_def SEC("maps") stats_map = {
       .type = BPF_MAP_TYPE_PERCPU_ARRAY,
@@ -96,6 +101,34 @@ static __always_inline int inc_stat(__u32 key, __u32 val) {
 	return 1;
 }
 
+static __always_inline int end(struct xdp_md *ctx, int action) {
+	void *data_end = (void *)(long)ctx->data_end;
+	void *data     = (void *)(long)ctx->data;
+
+	__u64 bytes = data_end - data;
+	__u32 packets_key = STAT_PACKETS_PASS_TOTAL;
+	__u32 bytes_key = STAT_BYTES_PASS_TOTAL;
+
+	if (action == XDP_ABORTED) {
+		packets_key = STAT_PACKETS_ABORTED_TOTAL;
+		bytes_key = STAT_BYTES_ABORTED_TOTAL;
+	} else if (action == XDP_PASS) {
+		packets_key = STAT_PACKETS_PASS_TOTAL;
+		bytes_key = STAT_BYTES_PASS_TOTAL;
+	} else if (action == XDP_TX) {
+		packets_key = STAT_PACKETS_TX_TOTAL;
+		bytes_key = STAT_BYTES_TX_TOTAL;
+	} else if (action == XDP_DROP) {
+		packets_key = STAT_PACKETS_DROP_TOTAL;
+		bytes_key = STAT_BYTES_DROP_TOTAL;
+	}
+
+	inc_stat(packets_key, 1);
+	inc_stat(bytes_key + 1, bytes);
+
+	return action;
+}
+
 SEC("xdp")
 int xdp_prog_func(struct xdp_md *ctx) {
 	void *data_end = (void *)(long)ctx->data_end;
@@ -106,7 +139,7 @@ int xdp_prog_func(struct xdp_md *ctx) {
 
 	struct ethhdr *eth = data;
 	if ((void *)(eth + 1) > data_end) {
-		return XDP_PASS;
+		return end(ctx, XDP_PASS);
 	}
 
 	struct iphdr *ip;
@@ -116,71 +149,71 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	int is_ipv6;
 	if (eth->h_proto == bpf_htons(ETH_P_IP)) {
 		ip = (void *)(eth + 1);
-    	if ((void *)(ip + 1) > data_end) {
-    		return XDP_PASS;
-    	}
+		if ((void *)(ip + 1) > data_end) {
+			return end(ctx, XDP_PASS);
+		}
 
-    	if (ip->ihl != 5 || ip->version != 4 || ip->protocol != IPPROTO_UDP) {
-    		return XDP_PASS;
-    	}
+		if (ip->ihl != 5 || ip->version != 4 || ip->protocol != IPPROTO_UDP) {
+			return end(ctx, XDP_PASS);
+		}
 
 		udp = (void *)(ip + 1);
 		if ((void *)(udp + 1) > data_end) {
-			return XDP_PASS;
+			return end(ctx, XDP_PASS);
 		}
 
 		is_ipv6 = 0;
 	} else if (eth->h_proto == bpf_htons(ETH_P_IPV6)) {
 		ip6 = (void *)(eth + 1);
 		if ((void *)(ip6 + 1) > data_end) {
-			return XDP_PASS;
+			return end(ctx, XDP_PASS);
 		}
 
 		if (ip6->version != 6 || ip6->nexthdr != IPPROTO_UDP) {
-			return XDP_PASS;
+			return end(ctx, XDP_PASS);
 		}
 
 		udp = (void *)(ip6 + 1);
 		if ((void *)(udp + 1) > data_end) {
-			return XDP_PASS;
+			return end(ctx, XDP_PASS);
 		}
 
 		is_ipv6 = 1;
 	} else {
-		return XDP_PASS;
+		return end(ctx, XDP_PASS);
 	}
 
 	__u32 config_key = 0;
 	struct config *c = bpf_map_lookup_elem(&config_map, &config_key);
 	if (!c) {
-		return XDP_PASS;
+		return end(ctx, XDP_PASS);
 	}
 
 	if (bpf_ntohs(udp->dest) != c->dst_port) {
-		return XDP_PASS;
+		return end(ctx, XDP_PASS);
 	}
 
 	struct stunreq *req = (void *)(udp + 1);
 	if ((void *)(req + 1) > data_end) {
-		return XDP_PASS;
+		return end(ctx, XDP_PASS);
 	}
 
 	if (bpf_ntohs(req->type) != STUN_BINDING_REQUEST) {
-		return XDP_PASS;
+		return end(ctx, XDP_PASS);
 	}
 	if (bpf_ntohl(req->magic) != STUN_MAGIC) {
-		return XDP_PASS;
+		return end(ctx, XDP_PASS);
 	}
 
 	void *attrs = (void *)(req + 1);
 	__u16 attrs_len = ((char *)data_end) - ((char *)attrs);
 	if (bpf_ntohs(req->length) != attrs_len) {
-		return XDP_PASS;
+		return end(ctx, XDP_PASS);
 	}
 
 	struct stunattr *sa = attrs;
 	if ((void *)(sa + 1) > data_end) {
-		return XDP_PASS;
+		return end(ctx, XDP_PASS);
 	}
 
 	// Assume the order and contents of attributes. We *could* loop through
@@ -197,16 +230,16 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	// assumptions made here.
 	void *attr_data = (void *)(sa + 1);
 	if (bpf_ntohs(sa->length) != 8 || bpf_ntohs(sa->num) != STUN_ATTR_SW) {
-		return XDP_PASS;
+		return end(ctx, XDP_PASS);
 	}
 	if (attr_data + 8 > data_end) {
-		return XDP_PASS;
+		return end(ctx, XDP_PASS);
 	}
 	char want_sw[] = {0x74, 0x61, 0x69, 0x6c, 0x6e, 0x6f, 0x64, 0x65}; // tailnode
 	char *got_sw = attr_data;
 	for (int j = 0; j < 8; j++) {
 		if (got_sw[j] != want_sw[j]) {
-			return XDP_PASS;
+			return end(ctx, XDP_PASS);
 		}
 	}
 
@@ -242,33 +275,33 @@ int xdp_prog_func(struct xdp_md *ctx) {
 		if ((void *)(xor6 + 1) > data_end) {
 			int expand = (void *)(xor6 + 1) - data_end;
 			if (bpf_xdp_adjust_tail(ctx, expand)) {
-				return XDP_ABORTED;
+				return end(ctx, XDP_ABORTED);
 			}
 			data_end = (void *)(long)ctx->data_end;
 			data = (void *)(long)ctx->data;
 			eth = data;
 			if ((void *)(eth + 1) > data_end) {
-				return XDP_ABORTED;
+				return end(ctx, XDP_ABORTED);
 			}
 			ip6 = (void *)(eth + 1);
 			if ((void *)(ip6 + 1) > data_end) {
-				return XDP_ABORTED;
+				return end(ctx, XDP_ABORTED);
 			}
 			udp = (void *)(ip6 + 1);
 			if ((void *)(udp + 1) > data_end) {
-				return XDP_ABORTED;
+				return end(ctx, XDP_ABORTED);
 			}
 			req = (void *)(udp + 1);
 			if ((void *)(req + 1) > data_end) {
-				return XDP_PASS;
+				return end(ctx, XDP_ABORTED);
 			}
 			sa = (void *)(req + 1);
 			if ((void *)(sa + 1) > data_end) {
-				return XDP_ABORTED;
+				return end(ctx, XDP_ABORTED);
 			}
 			xor6 = (void *)(sa + 1);
 			if ((void *)(xor6 + 1) > data_end) {
-				return XDP_ABORTED;
+				return end(ctx, XDP_ABORTED);
 			}
 		}
 		xor6->unused = 0x00; // unused byte
@@ -282,7 +315,7 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	} else {
 		xor = attr_data;
 		if ((void *)(xor + 1) > data_end) {
-			return XDP_ABORTED;
+			return end(ctx, XDP_ABORTED);
 		}
 		xor->unused = 0x00; // unused byte
 		xor->family = 0x01;
@@ -316,12 +349,12 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	if (is_ipv6) {
 		int shrink = (void *)(xor6 + 1) - data_end;
 		if (bpf_xdp_adjust_tail(ctx, shrink)) {
-			return XDP_ABORTED;
+			return end(ctx, XDP_ABORTED);
 		}
 	} else {
 		int shrink = (void *)(xor + 1) - data_end;
 		if (bpf_xdp_adjust_tail(ctx, shrink)) {
-			return XDP_ABORTED;
+			return end(ctx, XDP_ABORTED);
 		}
 	}
 
@@ -330,17 +363,17 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	data = (void *)(long)ctx->data;
 	eth = data;
 	if ((void *)(eth + 1) > data_end) {
-		return XDP_ABORTED;
+		return end(ctx, XDP_ABORTED);
 	}
 	if (is_ipv6) {
 		ip6 = (void *)(eth + 1);
 		if ((void *)(ip6 + 1) > data_end) {
-			return XDP_ABORTED;
+			return end(ctx, XDP_ABORTED);
 		}
 	} else {
 		ip = (void *)(eth + 1);
 		if ((void *)(ip + 1) > data_end) {
-			return XDP_ABORTED;
+			return end(ctx, XDP_ABORTED);
 		}
 	}
 
@@ -348,7 +381,7 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	__u32 cs = 0;
 	if (is_ipv6) {
 		if ((void *)(ip6 +1) > data_end) {
-			return XDP_ABORTED;
+			return end(ctx, XDP_ABORTED);
 		}
 		__u16 payload_len = data_end - (void *)(ip6 + 1);
 		ip6->payload_len = bpf_htons(payload_len);
@@ -368,7 +401,7 @@ int xdp_prog_func(struct xdp_md *ctx) {
 		to_csum_len += sizeof(*xor6);
 		udp = (void *)(ip6 + 1);
 		if ((void *)(udp +1) > data_end) {
-			return XDP_ABORTED;
+			return end(ctx, XDP_ABORTED);
 		}
 		__u16 udp_len = data_end - (void *)udp;
 		udp->len = bpf_htons(udp_len);
@@ -384,7 +417,7 @@ int xdp_prog_func(struct xdp_md *ctx) {
 		to_csum_len += sizeof(*xor);
 		udp = (void *)(ip + 1);
 		if ((void *)(udp +1) > data_end) {
-			return XDP_ABORTED;
+			return end(ctx, XDP_ABORTED);
 		}
 		__u16 udp_len = data_end - (void *)udp;
 		udp->len = bpf_htons(udp_len);
@@ -398,11 +431,9 @@ int xdp_prog_func(struct xdp_md *ctx) {
 		cs += udp->len;
 	}
 	if ((void *)udp + to_csum_len > data_end) {
-		return XDP_ABORTED;
+		return end(ctx, XDP_ABORTED);
 	}
 	cs = bpf_csum_diff(0, 0, (void*)udp, to_csum_len, cs);
 	udp->check = csum_fold_helper(cs);
-	inc_stat(STAT_PACKETS_TX_TOTAL, 1);
-	inc_stat(STAT_BYTES_TX_TOTAL, data_end - data);
-	return XDP_TX;
+	return end(ctx, XDP_TX);
 }

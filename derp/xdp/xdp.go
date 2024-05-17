@@ -14,7 +14,7 @@ import (
 	"github.com/cilium/ebpf/link"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type config bpf xdp.c -- -I headers
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type config -type stats_key bpf xdp.c -- -I headers
 
 var (
 	flagDevice  = flag.String("device", "", "target device name")
