@@ -1466,11 +1466,17 @@ func (b *LocalBackend) updateNetmapDeltaLocked(muts []netmap.NodeMutation) (hand
 
 // setExitNodeID updates prefs to reference an exit node by ID, rather
 // than by IP. It returns whether prefs was mutated.
-func setExitNodeID(prefs *ipn.Prefs, nm *netmap.NetworkMap) (prefsChanged bool) {
-	if exitNodeIDStr, _ := syspolicy.GetString(syspolicy.ExitNodeID, ""); exitNodeIDStr != "" && exitNodeIDStr != "auto" {
-		exitNodeID := tailcfg.StableNodeID(exitNodeIDStr)
-		changed := prefs.ExitNodeID != exitNodeID || prefs.ExitNodeIP.IsValid()
-		prefs.ExitNodeID = exitNodeID
+func (b *LocalBackend) setExitNodeID(prefs *ipn.Prefs, nm *netmap.NetworkMap) (prefsChanged bool) {
+	if exitNodeIDStr, _ := syspolicy.GetString(syspolicy.ExitNodeID, ""); exitNodeIDStr != "" {
+		var changed bool
+		if exitNodeIDStr == "auto" {
+			changed = prefs.ExitNodeID != b.lastSuggestedExitNode.id || prefs.ExitNodeIP.IsValid()
+			prefs.ExitNodeID = b.lastSuggestedExitNode.id
+		} else {
+			exitNodeID := tailcfg.StableNodeID(exitNodeIDStr)
+			changed = prefs.ExitNodeID != exitNodeID || prefs.ExitNodeIP.IsValid()
+			prefs.ExitNodeID = exitNodeID
+		}
 		prefs.ExitNodeIP = netip.Addr{}
 		return changed
 	}
@@ -3296,11 +3302,10 @@ func (b *LocalBackend) setPrefsLockedOnEntry(newp *ipn.Prefs, unlock unlockOnce)
 	if newp.ExitNodeID != b.lastSuggestedExitNode.id {
 		newp.ExitNodeID = b.lastSuggestedExitNode.id
 	}
-	//	} else {
 	// setExitNodeID returns whether it updated b.prefs, but
 	// everything in this function treats b.prefs as completely new
 	// anyway. No-op if no exit node resolution is needed.
-	setExitNodeID(newp, netMap)
+	b.setExitNodeID(newp, netMap)
 	//}
 	// applySysPolicy does likewise so we can also ignore its return value.
 	applySysPolicy(newp)

@@ -2523,7 +2523,6 @@ func (c *Conn) Rebind() {
 		c.logf("%v", err)
 		return
 	}
-
 	var ifIPs []netip.Prefix
 	if c.netMon != nil {
 		st := c.netMon.InterfaceState()
