@@ -24,11 +24,13 @@ struct bpf_map_def SEC("maps") config_map = {
       .max_entries = 1,
 };
 
+// TODO: stats map and enum
+
 struct stunreq {
 	__be16 type;
 	__be16 length;
 	__be32 magic;
-	__u8 txid[12];
+	__be32 txid[3];
 	// attributes follow
 };
 
@@ -42,6 +44,13 @@ struct stunxor {
 	__u8 family;
 	__be16 port;
 	__be32 addr;
+};
+
+struct stunxor6 {
+	__u8 unused;
+	__u8 family;
+	__be16 port;
+	__be32 addr[4];
 };
 
 #define STUN_BINDING_REQUEST 1
@@ -111,7 +120,6 @@ int xdp_prog_func(struct xdp_md *ctx) {
 		}
 
 		is_ipv6 = 1;
-		return XDP_PASS; // TODO remove
 	} else {
 		return XDP_PASS;
 	}
@@ -200,15 +208,60 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	}
 
 	// Set attr data.
-	struct stunxor *xor = attr_data;
-	if ((void *)(xor + 1) > data_end) {
-		return XDP_ABORTED;
+	struct stunxor *xor;
+	struct stunxor6 *xor6;
+	if (is_ipv6) {
+		xor6 = attr_data;
+		if ((void *)(xor6 + 1) > data_end) {
+			int expand = (void *)(xor6 + 1) - data_end;
+			if (bpf_xdp_adjust_tail(ctx, expand)) {
+				return XDP_ABORTED;
+			}
+			data_end = (void *)(long)ctx->data_end;
+			data = (void *)(long)ctx->data;
+			eth = data;
+			if ((void *)(eth + 1) > data_end) {
+				return XDP_ABORTED;
+			}
+			ip6 = (void *)(eth + 1);
+			if ((void *)(ip6 + 1) > data_end) {
+				return XDP_ABORTED;
+			}
+			udp = (void *)(ip6 + 1);
+			if ((void *)(udp + 1) > data_end) {
+				return XDP_ABORTED;
+			}
+			req = (void *)(udp + 1);
+			if ((void *)(req + 1) > data_end) {
+				return XDP_PASS;
+			}
+			sa = (void *)(req + 1);
+			if ((void *)(sa + 1) > data_end) {
+				return XDP_ABORTED;
+			}
+			xor6 = (void *)(sa + 1);
+			if ((void *)(xor6 + 1) > data_end) {
+				return XDP_ABORTED;
+			}
+		}
+		xor6->unused = 0x00; // unused byte
+		xor6->family = 0x02;
+		xor6->port = bpf_htons(bpf_ntohs(udp->source) ^ STUN_MAGIC_FOR_PORT_XOR);
+		xor6->addr[0] = bpf_htonl(bpf_ntohl(ip6->saddr.in6_u.u6_addr32[0]) ^ STUN_MAGIC);
+		for (int i = 1; i < 4; i++) {
+			// All three are __be32, no endianness flips.
+			xor6->addr[i] = ip6->saddr.in6_u.u6_addr32[i] ^ req->txid[i-1];
+		}
+	} else {
+		xor = attr_data;
+		if ((void *)(xor + 1) > data_end) {
+			return XDP_ABORTED;
+		}
+		xor->unused = 0x00; // unused byte
+		xor->family = 0x01;
+		xor->port = bpf_htons(bpf_ntohs(udp->source) ^ STUN_MAGIC_FOR_PORT_XOR);
+		xor->addr = bpf_htonl(bpf_ntohl(ip->saddr) ^ STUN_MAGIC);
 	}
-	xor->unused = 0x00; // unused byte
-	// TODO: ipv6
-	xor->family = 0x01; // family ipv4
-	xor->port = bpf_htons(bpf_ntohs(udp->source) ^ STUN_MAGIC_FOR_PORT_XOR);
-	xor->addr = bpf_htonl(bpf_ntohl(ip->saddr) ^ STUN_MAGIC);
 
 	// Flip ethernet header source and destination address.
 	__u8 eth_tmp[ETH_ALEN];
@@ -217,22 +270,32 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	__builtin_memcpy(eth->h_dest, eth_tmp, ETH_ALEN);
 
 	// Flip ip header source and destination address.
-	// TODO: ipv6
-	__be32 ip_tmp = ip->saddr;
-	ip->saddr = ip->daddr;
-	ip->daddr = ip_tmp;
+	if (is_ipv6) {
+		struct in6_addr ip_tmp = ip6->saddr;
+		ip6->saddr = ip6->daddr;
+		ip6->daddr = ip6->saddr;
+	} else {
+		__be32 ip_tmp = ip->saddr;
+		ip->saddr = ip->daddr;
+		ip->daddr = ip_tmp;
+	}
 
 	// Flip udp header source and destination ports;
 	__be16 port_tmp = udp->source;
 	udp->source = udp->dest;
 	udp->dest = port_tmp;
 
-	// TODO: stats
-
 	// Trim packet to end of xor stun attribute.
-	int shrink = (void *)(xor + 1) - data_end;
-	if (bpf_xdp_adjust_tail(ctx, shrink)) {
-		return XDP_ABORTED;
+	if (is_ipv6) {
+		int shrink = (void *)(xor6 + 1) - data_end;
+		if (bpf_xdp_adjust_tail(ctx, shrink)) {
+			return XDP_ABORTED;
+		}
+	} else {
+		int shrink = (void *)(xor + 1) - data_end;
+		if (bpf_xdp_adjust_tail(ctx, shrink)) {
+			return XDP_ABORTED;
+		}
 	}
 
 	// Reset pointers post tail adjustment.
@@ -242,47 +305,75 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	if ((void *)(eth + 1) > data_end) {
 		return XDP_ABORTED;
 	}
-	// TODO: ipv6
-	ip = (void *)(eth + 1);
-	if ((void *)(ip + 1) > data_end) {
-		return XDP_ABORTED;
+	if (is_ipv6) {
+		ip6 = (void *)(eth + 1);
+		if ((void *)(ip6 + 1) > data_end) {
+			return XDP_ABORTED;
+		}
+	} else {
+		ip = (void *)(eth + 1);
+		if ((void *)(ip + 1) > data_end) {
+			return XDP_ABORTED;
+		}
 	}
 
 	// Update ip header total length field and checksum.
-	// TODO: not ipv6
-	__u16 tot_len = data_end - (void *)ip;
-	ip->tot_len = bpf_htons(tot_len);
-	ip->check = 0;
 	__u32 cs = 0;
-	cs = bpf_csum_diff(0, 0, (void *)ip, sizeof(*ip), cs);
-	ip->check = csum_fold_helper(cs);
-
-	// Update udp header length and checksum.
-	udp = (void *)(ip + 1);
-	if ((void *)(udp +1) > data_end) {
-		return XDP_ABORTED;
+	if (is_ipv6) {
+		if ((void *)(ip6 +1) > data_end) {
+			return XDP_ABORTED;
+		}
+		__u16 payload_len = data_end - (void *)(ip6 + 1);
+		ip6->payload_len = bpf_htons(payload_len);
+	} else {
+		__u16 tot_len = data_end - (void *)ip;
+		ip->tot_len = bpf_htons(tot_len);
+		ip->check = 0;
+		cs = bpf_csum_diff(0, 0, (void *)ip, sizeof(*ip), cs);
+		ip->check = csum_fold_helper(cs);
 	}
-	__u16 udp_len = data_end - (void *)udp;
-	udp->len = bpf_htons(udp_len);
-	udp->check = 0;
-	cs = 0;
-	// Pseudoheader bits.
-	// TODO: ipv6
-	cs += (__u16)ip->saddr;
-	cs += (__u16)(ip->saddr >> 16);
-	cs += (__u16)ip->daddr;
-	cs += (__u16)(ip->daddr >> 16);
-	cs += (__u16)ip->protocol << 8;
-	cs += udp->len;
+
 	// Avoid dynamic length math against the packet pointer, which is just a big
-	// verifier headache. Instead sizeof() all the things.
-	// TODO: ipv6
-	int to_size = sizeof(*udp) + sizeof(*req) + sizeof(*sa) + sizeof(*xor);
-	if ((void *)udp + to_size > data_end) {
+    // verifier headache. Instead sizeof() all the things.
+	int to_csum_len = sizeof(*udp) + sizeof(*req) + sizeof(*sa);
+	// Update udp header length and checksum.
+	if (is_ipv6) {
+		to_csum_len += sizeof(*xor6);
+		udp = (void *)(ip6 + 1);
+		if ((void *)(udp +1) > data_end) {
+			return XDP_ABORTED;
+		}
+		__u16 udp_len = data_end - (void *)udp;
+		udp->len = bpf_htons(udp_len);
+		udp->check = 0;
+		cs = 0;
+		for (int i = 0;i < 8;i ++) {
+			cs += ip6->saddr.in6_u.u6_addr16[i];
+			cs += ip6->daddr.in6_u.u6_addr16[i];
+		}
+		cs += (__u16)ip6->nexthdr << 8;
+		cs += udp->len;
+	} else {
+		to_csum_len += sizeof(*xor);
+		udp = (void *)(ip + 1);
+		if ((void *)(udp +1) > data_end) {
+			return XDP_ABORTED;
+		}
+		__u16 udp_len = data_end - (void *)udp;
+		udp->len = bpf_htons(udp_len);
+		udp->check = 0;
+		cs = 0;
+		cs += (__u16)ip->saddr;
+		cs += (__u16)(ip->saddr >> 16);
+		cs += (__u16)ip->daddr;
+		cs += (__u16)(ip->daddr >> 16);
+		cs += (__u16)ip->protocol << 8;
+		cs += udp->len;
+	}
+	if ((void *)udp + to_csum_len > data_end) {
 		return XDP_ABORTED;
 	}
-	cs = bpf_csum_diff(0, 0, (void*)udp, to_size, cs);
+	cs = bpf_csum_diff(0, 0, (void*)udp, to_csum_len, cs);
 	udp->check = csum_fold_helper(cs);
-
 	return XDP_TX;
 }
