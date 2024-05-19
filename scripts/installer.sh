@@ -513,7 +513,10 @@ main() {
 			;;
 		pacman)
 			set -x
-			$SUDO pacman -Sy
+			# https://github.com/tailscale/tailscale/issues/12186
+			if [ "$OS" != "arch" ]; then
+				$SUDO pacman -Sy
+			fi
 			$SUDO pacman -S tailscale --noconfirm
 			$SUDO systemctl enable --now tailscaled
 			set +x
