@@ -1855,7 +1855,9 @@ func TestSetExitNodeIDPolicy(t *testing.T) {
 			pm.prefs = test.prefs.View()
 			b.netMap = test.nm
 			b.pm = pm
-			changed := setExitNodeID(b.pm.prefs.AsStruct(), test.nm)
+			b.mu.Lock()
+			changed := b.setExitNodeIDLocked(b.pm.prefs.AsStruct(), test.nm)
+			b.mu.Unlock()
 			b.SetPrefsForTest(pm.CurrentPrefs().AsStruct())
 
 			if got := b.pm.prefs.ExitNodeID(); got != tailcfg.StableNodeID(test.exitNodeIDWant) {

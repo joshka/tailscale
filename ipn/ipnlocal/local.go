@@ -659,19 +659,18 @@ func (b *LocalBackend) linkChange(delta *netmon.ChangeDelta) {
 	b.updateFilterLocked(b.netMap, b.pm.CurrentPrefs())
 	updateExitNodeUsageWarning(b.pm.CurrentPrefs(), delta.New, b.health)
 
-	if exitNodeIDStr, _ := syspolicy.GetString(syspolicy.ExitNodeID, ""); exitNodeIDStr == "auto" {
-		// Find suggested exit node on every link change.
-		res, err := b.suggestExitNodeLocked(true)
-		if err != nil {
-			b.logf("linkChange: unable to suggest exit node %v", err)
-		}
-		b.lastSuggestedExitNode = lastSuggestedExitNode{res.ID, res.Name}
-	}
 	if peerAPIListenAsync && b.netMap != nil && b.state == ipn.Running {
 		want := b.netMap.GetAddresses().Len()
 		if len(b.peerAPIListeners) < want {
 			b.logf("linkChange: peerAPIListeners too low; trying again")
 			go b.initPeerAPIListener()
+		}
+	}
+
+	if delta.Major {
+		if exitNodeIDStr, _ := syspolicy.GetString(syspolicy.ExitNodeID, ""); exitNodeIDStr == "auto" {
+			prefs := b.pm.CurrentPrefs().AsStruct()
+			b.setExitNodeIDLocked(prefs, b.netMap)
 		}
 	}
 }
@@ -1179,20 +1178,8 @@ func (b *LocalBackend) SetControlClientStatus(c controlclient.Client, st control
 		prefs.WantRunning = true
 		prefs.LoggedOut = false
 	}
-	if exitNodeIDStr, _ := syspolicy.GetString(syspolicy.ExitNodeID, ""); exitNodeIDStr == "auto" {
-		// if netmap's peers have changed, find new exit node suggestion.
-		if st.NetMap != nil && netMap != nil && !slices.Equal(st.NetMap.Peers, netMap.Peers) {
-			res, err := b.suggestExitNodeLocked(true)
-			if err != nil {
-				b.logf("SetControlClientStatus: Failed to update auto exit node")
-			}
-			prefsChanged = prefs.ExitNodeID == res.ID
-			prefs.ExitNodeID = res.ID
-		}
-	} else {
-		if setExitNodeID(prefs, st.NetMap) {
-			prefsChanged = true
-		}
+	if b.setExitNodeIDLocked(prefs, st.NetMap) {
+		prefsChanged = true
 	}
 	if applySysPolicy(prefs) {
 		prefsChanged = true
@@ -1410,6 +1397,10 @@ func (b *LocalBackend) UpdateNetmapDelta(muts []netmap.NodeMutation) (handled bo
 			return cmp.Compare(a.ID(), b.ID())
 		})
 		notify = &ipn.Notify{NetMap: nm}
+		if exitNodeIDStr, _ := syspolicy.GetString(syspolicy.ExitNodeID, ""); exitNodeIDStr == "auto" {
+			prefs := b.pm.CurrentPrefs().AsStruct()
+			b.setExitNodeIDLocked(prefs, nm)
+		}
 	} else if testenv.InTest() {
 		// In tests, send an empty Notify as a wake-up so end-to-end
 		// integration tests in another repo can check on the status of
@@ -1464,14 +1455,23 @@ func (b *LocalBackend) updateNetmapDeltaLocked(muts []netmap.NodeMutation) (hand
 	return true
 }
 
-// setExitNodeID updates prefs to reference an exit node by ID, rather
+// setExitNodeIDLocked updates prefs to reference an exit node by ID, rather
 // than by IP. It returns whether prefs was mutated.
-func (b *LocalBackend) setExitNodeID(prefs *ipn.Prefs, nm *netmap.NetworkMap) (prefsChanged bool) {
+func (b *LocalBackend) setExitNodeIDLocked(prefs *ipn.Prefs, nm *netmap.NetworkMap) (prefsChanged bool) {
 	if exitNodeIDStr, _ := syspolicy.GetString(syspolicy.ExitNodeID, ""); exitNodeIDStr != "" {
 		var changed bool
 		if exitNodeIDStr == "auto" {
-			changed = prefs.ExitNodeID != b.lastSuggestedExitNode.id || prefs.ExitNodeIP.IsValid()
-			prefs.ExitNodeID = b.lastSuggestedExitNode.id
+			if b.lastSuggestedExitNode.id != "" {
+				changed = prefs.ExitNodeID != b.lastSuggestedExitNode.id || prefs.ExitNodeIP.IsValid()
+				prefs.ExitNodeID = b.lastSuggestedExitNode.id
+			} else {
+				res, err := b.suggestExitNodeLocked(true)
+				if err != nil {
+					b.logf("setExitNodeIDLocked: Unable to suggest exit node. Error=%v", err)
+				}
+				changed = prefs.ExitNodeID != res.ID || prefs.ExitNodeIP.IsValid()
+				prefs.ExitNodeID = res.ID
+			}
 		} else {
 			exitNodeID := tailcfg.StableNodeID(exitNodeIDStr)
 			changed = prefs.ExitNodeID != exitNodeID || prefs.ExitNodeIP.IsValid()
@@ -3297,15 +3297,10 @@ func (b *LocalBackend) setPrefsLockedOnEntry(newp *ipn.Prefs, unlock unlockOnce)
 	if oldp.Valid() {
 		newp.Persist = oldp.Persist().AsStruct() // caller isn't allowed to override this
 	}
-	// if ExitNodeID has the string value auto, use the last suggested exit node.
-	//if exitNodeIDStr, _ := syspolicy.GetString(syspolicy.ExitNodeID, ""); exitNodeIDStr == "auto" {
-	if newp.ExitNodeID != b.lastSuggestedExitNode.id {
-		newp.ExitNodeID = b.lastSuggestedExitNode.id
-	}
-	// setExitNodeID returns whether it updated b.prefs, but
+	// setExitNodeIDLocked returns whether it updated b.prefs, but
 	// everything in this function treats b.prefs as completely new
 	// anyway. No-op if no exit node resolution is needed.
-	b.setExitNodeID(newp, netMap)
+	b.setExitNodeIDLocked(newp, netMap)
 	//}
 	// applySysPolicy does likewise so we can also ignore its return value.
 	applySysPolicy(newp)
@@ -4822,7 +4817,6 @@ func (b *LocalBackend) setNetMapLocked(nm *netmap.NetworkMap) {
 	if nm != nil {
 		login = cmp.Or(nm.UserProfiles[nm.User()].LoginName, "<missing-profile>")
 	}
-	prevNetMap := b.netMap
 	b.netMap = nm
 	b.updatePeersFromNetmapLocked(nm)
 	if login != b.activeLogin {
@@ -4892,16 +4886,6 @@ func (b *LocalBackend) setNetMapLocked(nm *netmap.NetworkMap) {
 	for k, v := range b.nodeByAddr {
 		if v == 0 {
 			delete(b.nodeByAddr, k)
-		}
-	}
-	if exitNodeIDStr, _ := syspolicy.GetString(syspolicy.ExitNodeID, ""); exitNodeIDStr == "auto" {
-		// if netmap's peers have changed, find new exit node suggestion.
-		if prevNetMap != nil && !slices.Equal(prevNetMap.Peers, nm.Peers) {
-			res, err := b.suggestExitNodeLocked(true)
-			if err != nil {
-				b.logf("Error suggesting exit node %v", err)
-			}
-			b.lastSuggestedExitNode = lastSuggestedExitNode{res.ID, res.Name}
 		}
 	}
 
