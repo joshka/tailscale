@@ -157,6 +157,8 @@ int xdp_prog_func(struct xdp_md *ctx) {
 			return end(ctx, XDP_PASS);
 		}
 
+		// TODO: consider validating ip header checksum
+
 		udp = (void *)(ip + 1);
 		if ((void *)(udp + 1) > data_end) {
 			return end(ctx, XDP_PASS);
@@ -182,6 +184,8 @@ int xdp_prog_func(struct xdp_md *ctx) {
 	} else {
 		return end(ctx, XDP_PASS);
 	}
+
+	// TODO: consider validating UDP header checksum
 
 	__u32 config_key = 0;
 	struct config *c = bpf_map_lookup_elem(&config_map, &config_key);
