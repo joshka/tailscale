@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"net"
 	"time"
 
@@ -13,7 +14,7 @@ const (
 	flags = unix.SOF_TIMESTAMPING_TX_SOFTWARE | unix.SOF_TIMESTAMPING_RX_SOFTWARE
 )
 
-func getConnKernelTimestamp() (*socket.Conn, error) {
+func getConnKernelTimestamp() (io.Closer, error) {
 	sconn, err := socket.Socket(unix.AF_INET, unix.SOCK_DGRAM, unix.IPPROTO_UDP, "udp", nil)
 	if err != nil {
 		return nil, err
@@ -30,6 +31,6 @@ func getConnKernelTimestamp() (*socket.Conn, error) {
 	return sconn, nil
 }
 
-func measureRTTKernel(conn *socket.Conn, dst *net.UDPAddr, req []byte) (resp []byte, rtt time.Duration, err error) {
+func measureRTTKernel(conn io.Closer, dst *net.UDPAddr, req []byte) (resp []byte, rtt time.Duration, err error) {
 	return nil, 0, errors.New("todo")
 }

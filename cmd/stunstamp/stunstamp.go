@@ -7,7 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/mdlayher/socket"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -94,7 +94,7 @@ func probe(hostName string, addr netip.Addr, source timestampSource, interval ti
 	first := true
 
 	var (
-		sconn *socket.Conn
+		sconn io.Closer
 		conn  *net.UDPConn
 		err   error
 	)
